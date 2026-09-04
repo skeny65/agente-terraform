@@ -1,0 +1,129 @@
+name: Terraform Plan
+
+# En cada PR que toque stacks/**  -> fmt / init / validate / tflint  y comenta en el PR.
+# El job 'plan' (terraform plan real) se activa cuando definas la variable de repo
+# AZURE_ENABLED = "true" y los secrets ARM_*  (hasta entonces solo llega a validate).
+
+on:
+  pull_request:
+    paths:
+      - "stacks/**"
+      - ".github/workflows/terraform-plan.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  TF_VERSION: "1.15.8"
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  validate:
+    name: fmt · init · validate · tflint
+    runs-on: ubuntu-latest
+    outputs:
+      stacks: ${{ steps.detect.outputs.stacks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detectar stacks afectados
+        id: detect
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base='${{ github.event.pull_request.base.sha }}'
+            head='${{ github.event.pull_request.head.sha }}'
+            changed=$(git diff --name-only "$base" "$head" | grep -E '^stacks/[^/]+/' | sed -E 's#^(stacks/[^/]+)/.*#\1#' | sort -u || true)
+          else
+            changed=$(find stacks -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort || true)
+          fi
+          [ -z "$changed" ] && changed=$(find stacks -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort || true)
+          echo "stacks<<EOF"  >> "$GITHUB_OUTPUT"
+          echo "$changed"     >> "$GITHUB_OUTPUT"
+          echo "EOF"          >> "$GITHUB_OUTPUT"
+          echo "Stacks: $changed"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: fmt / init -backend=false / validate / tflint
+        id: checks
+        shell: bash
+        run: |
+          set -o pipefail
+          RES=""
+          FAIL=0
+          for d in ${{ steps.detect.outputs.stacks }}; do
+            [ -d "$d" ] || continue
+            echo "::group::$d"
+            OUT=""
+            terraform -chdir="$d" fmt -check -recursive -no-color 2>&1 | tee /tmp/fmt.txt || { FAIL=1; OUT="$OUT\n  fmt: FALLA (ejecuta 'terraform fmt')"; }
+            terraform -chdir="$d" init -backend=false -input=false -no-color 2>&1 | tee /tmp/init.txt || { FAIL=1; OUT="$OUT\n  init: FALLA"; }
+            terraform -chdir="$d" validate -no-color 2>&1 | tee /tmp/val.txt || { FAIL=1; OUT="$OUT\n  validate: FALLA\n$(sed 's/^/    /' /tmp/val.txt)"; }
+            ( cd "$d" && tflint --no-color --format compact 2>&1 | tee /tmp/lint.txt ) || OUT="$OUT\n  tflint: avisos\n$(sed 's/^/    /' /tmp/lint.txt)"
+            [ -z "$OUT" ] && OUT="\n  OK"
+            RES="$RES\n### \`$d\`$OUT"
+            echo "::endgroup::"
+          done
+          { echo "resumen<<EOF"; echo -e "$RES"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          exit $FAIL
+
+      - name: Comentar resultado en el PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `## Terraform — validación\n${{ toJSON(steps.checks.outputs.resumen) }}\n\n`
+              + (`${{ job.status }}` === 'success'
+                  ? '✅ fmt/init/validate OK. El `plan` real requiere Azure (var `AZURE_ENABLED=true` + secrets `ARM_*`).'
+                  : '❌ Revisa los fallos de arriba.');
+            const {data: comments} = await github.rest.issues.listComments({...context.repo, issue_number: context.issue.number});
+            const mine = comments.find(c => c.user.type === 'Bot' && c.body.startsWith('## Terraform — validación'));
+            if (mine) await github.rest.issues.updateComment({...context.repo, comment_id: mine.id, body});
+            else await github.rest.issues.createComment({...context.repo, issue_number: context.issue.number, body});
+
+  plan:
+    name: terraform plan (requiere Azure)
+    runs-on: ubuntu-latest
+    needs: validate
+    if: ${{ vars.AZURE_ENABLED == 'true' }}
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - name: plan por stack
+        id: plan
+        shell: bash
+        run: |
+          OUT=""
+          for d in ${{ needs.validate.outputs.stacks }}; do
+            [ -d "$d" ] || continue
+            terraform -chdir="$d" init -input=false -no-color
+            terraform -chdir="$d" plan -input=false -no-color -lock=false -out="$d/tfplan" 2>&1 | tee "$d/plan.txt"
+            OUT="$OUT\n<details><summary>plan: $d</summary>\n\n\`\`\`\n$(tail -c 60000 "$d/plan.txt")\n\`\`\`\n</details>"
+          done
+          { echo "salida<<EOF"; echo -e "$OUT"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+      - name: Comentar el plan en el PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `## Terraform — plan\n${{ toJSON(steps.plan.outputs.salida) }}\n\n> Revisa el plan. El \`apply\` es un paso manual aparte (workflow 'Terraform Apply').`;
+            await github.rest.issues.createComment({...context.repo, issue_number: context.issue.number, body});

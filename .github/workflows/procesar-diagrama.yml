@@ -1,0 +1,57 @@
+name: Procesar diagrama
+
+# Sube un .drawio (y opcional .xlsx) a la carpeta inbox/ (GitHub web -> Add file -> Upload files,
+# commit a main). Este workflow lo descifra, genera el Terraform en stacks/<nombre>/ y ABRE UN PR.
+# El PR dispara "Terraform Plan" (fmt/init/validate/tflint -> comentario en el PR).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "inbox/**"
+      - "!inbox/README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  generar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # PAT para que el PR resultante SÍ dispare "Terraform Plan"
+          # (un PR creado con GITHUB_TOKEN no dispara otros workflows).
+          token: ${{ secrets.AGENT_PAT }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install --quiet openpyxl
+
+      - name: Descifrar + generar Terraform
+        id: gen
+        run: python scripts/ci_procesar.py
+
+      - name: Abrir Pull Request
+        if: steps.gen.outputs.nuevos != '0' && steps.gen.outputs.nuevos != ''
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PAT }}
+        run: |
+          set -e
+          RUN="${{ github.run_id }}"
+          BR="diagrama/${RUN}"
+          git config user.name  "agente-terraform"
+          git config user.email "agente@local"
+          git checkout -b "$BR"
+          git add -A
+          git commit -m "infra: stacks generados desde inbox/ (run ${RUN})"
+          git push origin "$BR"
+          BODY=$(printf 'Terraform generado automáticamente desde el/los diagrama(s) de `inbox/`.\n\nStacks: `%s`\n\nEl workflow **Terraform Plan** valida esto y comenta abajo. Revisa y mergea.' "${{ steps.gen.outputs.stacks }}")
+          gh pr create --base main --head "$BR" \
+            --title "infra: ${{ steps.gen.outputs.stacks }}" \
+            --body "$BODY"
