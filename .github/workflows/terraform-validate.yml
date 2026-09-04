@@ -1,8 +1,10 @@
 name: Terraform Validate
 
-# En cada PR que toque stacks/**  ->  fmt / init -backend=false / validate / tflint
-# y comenta el resultado en el PR. NO ejecuta 'terraform plan' (aún no hay Azure):
-# el flujo del agente llega SOLO hasta 'validate'. El job 'plan' se añadirá aquí el
+# Red de seguridad para PRs donde alguien edita stacks/** A MANO.
+# El flujo normal (subir .drawio a diagrama/) YA valida dentro de "Procesar diagrama",
+# así que este workflow es secundario. En cada PR que toque stacks/**:
+#   fmt / init -backend=false / validate / tflint  -> comenta el resultado.
+# NO ejecuta 'terraform plan' (aún no hay Azure). El job 'plan' se añadirá aquí el
 # día que existan la variable de repo AZURE_ENABLED y los secrets ARM_*.
 
 on:

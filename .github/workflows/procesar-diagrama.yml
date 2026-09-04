@@ -1,17 +1,22 @@
 name: Procesar diagrama
 
 # Deja el/los .drawio (y un .xlsx opcional) en la carpeta  diagrama/  del repo
-# (repo -> Add file -> Upload files -> commit a main), y GitHub hace el resto:
+# (repo -> Add file -> Upload files -> commit a main) y GitHub hace TODO en un solo run:
 #
-#   descifra (determinista, SIN LLM) -> genera Terraform en stacks/<nombre>/
-#   -> abre un Pull Request -> el PR dispara "Terraform Validate"
-#      (fmt / init / validate / tflint -> comentario en el PR).
+#   descifra (determinista, SIN LLM) -> genera stacks/<nombre>/*.tf
+#   -> terraform fmt -> fmt-check / init -backend=false / validate / tflint
+#   -> commit a la rama diagrama/<run_id> -> abre un Pull Request con el resultado.
+#
+# NO hace falta ningún PAT: la validación corre en este mismo run (no depende de que el
+# PR dispare otro workflow). Para que el PR se abra solo, marca una casilla en el repo:
+#   Settings -> Actions -> General -> Workflow permissions
+#   -> [x] Allow GitHub Actions to create and approve pull requests
+# Si no está marcada, el run sube la rama y deja el enlace para abrir el PR a mano.
 #
 # Alternativa sin subir archivo: Actions -> "Procesar diagrama" -> Run workflow ->
-# pega el XML del .drawio en el campo 'diagrama_xml'
-# (en draw.io: Extras -> Edit Diagram -> copiar todo).
+# pega el XML en 'diagrama_xml' (en draw.io: Extras -> Edit Diagram -> copiar todo).
 #
-# El flujo llega SOLO hasta 'validate' (aún no hay Azure -> no hay 'plan' ni 'apply').
+# Llega SOLO hasta 'validate' (aún no hay Azure -> no hay 'plan' ni 'apply').
 
 on:
   workflow_dispatch:
@@ -37,6 +42,10 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  TF_VERSION: "1.15.8"
+  TF_IN_AUTOMATION: "true"
+
 jobs:
   generar:
     runs-on: ubuntu-latest
@@ -44,9 +53,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # con AGENT_PAT el PR resultante SÍ dispara "Terraform Validate"; sin él, se usa
-          # el token normal y el PR habrá que abrirlo/relanzarlo a mano.
-          token: ${{ secrets.AGENT_PAT || github.token }}
 
       - name: Guardar el XML pegado en diagrama/ (si se usó el campo)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagrama_xml != '' }}
@@ -71,25 +77,60 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.15.8"
+          terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
 
       - name: Descifrar + generar Terraform
         id: gen
         run: python scripts/ci_procesar.py
 
-      - name: terraform fmt (deja los stacks listos para 'Terraform Validate')
+      - name: Nada que procesar
+        if: steps.gen.outputs.nuevos == '0' || steps.gen.outputs.nuevos == ''
+        run: |
+          echo "::warning::No había ningún .drawio en diagrama/ (ni inbox/ ni la raíz). Sube un .drawio y vuelve a intentarlo, o usa el campo 'diagrama_xml'."
+
+      - name: terraform fmt
         if: steps.gen.outputs.nuevos != '0' && steps.gen.outputs.nuevos != ''
         run: terraform fmt -recursive stacks/
 
-      - name: Rama + commit + Pull Request
+      - name: Validar (fmt-check / init -backend=false / validate / tflint)
+        id: validate
         if: steps.gen.outputs.nuevos != '0' && steps.gen.outputs.nuevos != ''
+        shell: bash
+        run: |
+          set -o pipefail
+          RES=""
+          FAIL=0
+          for d in ${{ steps.gen.outputs.stacks }}; do
+            [ -d "$d" ] || continue
+            echo "::group::$d"
+            OUT=""
+            terraform -chdir="$d" fmt -check -recursive -no-color            || { FAIL=1; OUT="$OUT"$'\n'"  fmt: FALLA"; }
+            terraform -chdir="$d" init -backend=false -input=false -no-color  || { FAIL=1; OUT="$OUT"$'\n'"  init: FALLA"; }
+            terraform -chdir="$d" validate -no-color 2>&1 | tee /tmp/v.txt    || { FAIL=1; OUT="$OUT"$'\n'"  validate: FALLA"$'\n'"$(sed 's/^/    /' /tmp/v.txt)"; }
+            ( cd "$d" && tflint --no-color --format compact 2>&1 | tee /tmp/l.txt ) || OUT="$OUT"$'\n'"  tflint: avisos"$'\n'"$(sed 's/^/    /' /tmp/l.txt)"
+            [ -z "$OUT" ] && OUT=$'\n'"  OK"
+            RES="$RES"$'\n'"### \`$d\`$OUT"
+            echo "::endgroup::"
+          done
+          { echo "resumen<<EOF"; echo "$RES"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          { echo "## Terraform — validación"; echo "$RES"; } >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
+      - name: Rama + commit + Pull Request
+        if: always() && steps.gen.outputs.nuevos != '0' && steps.gen.outputs.nuevos != ''
         env:
-          GH_TOKEN: ${{ secrets.AGENT_PAT || github.token }}
-          TIENE_PAT: ${{ secrets.AGENT_PAT != '' }}
+          GH_TOKEN: ${{ github.token }}
           STACKS: ${{ steps.gen.outputs.stacks }}
+          RESUMEN: ${{ steps.validate.outputs.resumen }}
+          VEREDICTO: ${{ steps.validate.outcome }}
           RUN_ID: ${{ github.run_id }}
           REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
         run: |
           set -e
           BR="diagrama/${RUN_ID}"
@@ -99,14 +140,7 @@ jobs:
           git add -A
           git commit -m "infra: stacks generados desde el diagrama (run ${RUN_ID})"
           git push origin "$BR"
-          BODY=$(printf 'Terraform generado automáticamente desde el diagrama.\n\nStacks: `%s`\n\nEl workflow **Terraform Validate** comprueba fmt / init / validate / tflint y comenta abajo. Es el último stage (sin `plan`, aún no hay Azure). Revisa y mergea.' "$STACKS")
-          if [ "$TIENE_PAT" = "true" ]; then
-            gh pr create --base main --head "$BR" --title "infra: $STACKS" --body "$BODY"
-          else
-            echo "::warning::No hay secret AGENT_PAT. Rama '$BR' subida; abre el PR a mano: https://github.com/${REPO}/pull/new/${BR}  (y así se ejecutará 'Terraform Validate')."
-          fi
-
-      - name: Aviso si no se generó nada
-        if: steps.gen.outputs.nuevos == '0' || steps.gen.outputs.nuevos == ''
-        run: |
-          echo "::warning::No había ningún .drawio que procesar. Pega el XML en el campo 'diagrama_xml', o sube el .drawio a diagrama/ (o a inbox/ o a la raíz del repo)."
+          if [ "$VEREDICTO" = "success" ]; then ICONO="✅"; VER="validación OK"; else ICONO="❌"; VER="validación con FALLOS"; fi
+          BODY=$(printf '%s Terraform generado desde el diagrama y **validado en este mismo run** (sin PAT).\n\nStacks: `%s`\n\n## Validación — %s\n%s\n\n> Último stage: no hay `plan` ni `apply` (aún sin Azure). Revisa los `.tf` y mergea.' "$ICONO" "$STACKS" "$VER" "$RESUMEN")
+          gh pr create --base main --head "$BR" --title "infra: $STACKS ($ICONO $VER)" --body "$BODY" \
+            || echo "::warning::No se pudo abrir el PR. Marca: Settings -> Actions -> General -> 'Allow GitHub Actions to create and approve pull requests'. Rama subida: ${SERVER}/${REPO}/pull/new/${BR}"

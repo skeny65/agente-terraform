@@ -6,12 +6,17 @@ Terraform generado por el **agente local** (diagrama draw.io → HCL) y validado
 
 1. Subes tu(s) `.drawio` (y un `.xlsx` opcional) a la carpeta **`diagrama/`**
    (GitHub web → *Add file → Upload files* → commit a `main`).
-2. El push dispara **Procesar diagrama**: descifra el diagrama (determinista, sin LLM),
-   genera el Terraform en `stacks/<nombre>/` y **abre un Pull Request**.
-3. El PR dispara **Terraform Validate**: `fmt` · `init -backend=false` · `validate` · `tflint`,
-   y comenta el resultado en el PR. **Ese es el último stage** (sin `plan` ni `apply`
-   todavía — no hay Azure).
-4. Revisas el PR. Si está bien, lo mergeas.
+2. El push dispara **Procesar diagrama**, que en un solo run: descifra el diagrama
+   (determinista, sin LLM) → genera `stacks/<nombre>/` → `terraform fmt` →
+   **`fmt`-check · `init -backend=false` · `validate` · `tflint`** → **abre un Pull Request**
+   con el resultado de la validación en la descripción. **Ese es el último stage**
+   (sin `plan` ni `apply` todavía — no hay Azure).
+3. Revisas el PR. Si está bien, lo mergeas.
+
+> **No hace falta ningún PAT.** Para que el PR se abra solo, marca una casilla:
+> *Settings → Actions → General → Workflow permissions →*
+> **☑ Allow GitHub Actions to create and approve pull requests**.
+> Si no la marcas, el run sube la rama `diagrama/<run_id>` y deja el enlace para abrir el PR a mano.
 
 ## Cuando haya Azure (más adelante)
 
