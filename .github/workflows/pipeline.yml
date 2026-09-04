@@ -7,7 +7,8 @@ name: Diagrama a Terraform
 #   4) apply     · terraform apply    [DESACTIVADO — ver más abajo]
 #
 # ENTRADA:  sube el .drawio a la carpeta  diagrama/  (Add file ▸ Upload files ▸ commit a main)
-#           o  Actions ▸ "Diagrama a Terraform" ▸ Run workflow ▸ pega el XML en 'diagrama_xml'.
+#           o  Actions ▸ "Diagrama a Terraform" ▸ Run workflow ▸ pega el XML en 'diagrama_xml'
+#              (Run workflow sin diagrama = re-valida todos los stacks que ya hay en stacks/).
 #
 # NO hace falta ningún PAT. Para que el PR se abra solo:
 #   Settings ▸ Actions ▸ General ▸ Workflow permissions
@@ -25,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       diagrama_xml:
-        description: "XML del .drawio (pega aquí; vacío si ya lo subiste a diagrama/)"
+        description: "XML del .drawio (pega aquí; vacío = re-validar los stacks existentes)"
         required: false
         type: string
       nombre:
@@ -45,10 +46,6 @@ on:
       - "inbox/**"
       - "!inbox/README.md"
       - "*.drawio"
-  pull_request:
-    paths:
-      - "stacks/**"
-      - ".github/workflows/pipeline.yml"
 
 permissions:
   contents: write
@@ -64,7 +61,6 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════
   procesar:
     name: "1 · procesar (diagrama → HCL)"
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       nuevos: ${{ steps.gen.outputs.nuevos }}
@@ -106,7 +102,7 @@ jobs:
 
       - name: Nada que procesar
         if: steps.gen.outputs.nuevos == '0' || steps.gen.outputs.nuevos == ''
-        run: echo "::warning::No había ningún .drawio en diagrama/ (ni inbox/ ni la raíz). Sube un .drawio y reintenta."
+        run: echo "::notice::Sin .drawio nuevo en diagrama/. El stage validate re-comprueba los stacks que ya existen."
 
       - name: terraform fmt
         if: steps.gen.outputs.nuevos != '0' && steps.gen.outputs.nuevos != ''
@@ -145,11 +141,7 @@ jobs:
   validate:
     name: "2 · validate"
     needs: procesar
-    if: |
-      always() && (
-        github.event_name == 'pull_request' ||
-        (needs.procesar.result == 'success' && needs.procesar.outputs.nuevos != '0' && needs.procesar.outputs.nuevos != '')
-      )
+    if: ${{ always() && needs.procesar.result == 'success' }}
     runs-on: ubuntu-latest
     outputs:
       list: ${{ steps.which.outputs.list }}
@@ -159,22 +151,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'pull_request' && github.ref || needs.procesar.outputs.branch }}
+          ref: ${{ needs.procesar.outputs.branch || github.ref }}
 
       - name: Stacks a validar
         id: which
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base='${{ github.event.pull_request.base.sha }}'
-            head='${{ github.event.pull_request.head.sha }}'
-            list=$(git diff --name-only "$base" "$head" | grep -E '^stacks/[^/]+/' | sed -E 's#^(stacks/[^/]+)/.*#\1#' | sort -u || true)
-          else
-            list="${{ needs.procesar.outputs.stacks }}"
-          fi
+          list="${{ needs.procesar.outputs.stacks }}"
           [ -z "$list" ] && list=$(find stacks -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort || true)
           { echo "list<<EOF"; echo "$list"; echo "EOF"; } >> "$GITHUB_OUTPUT"
-          echo "Stacks: $list"
+          echo "Stacks: ${list:-(ninguno)}"
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -207,26 +193,25 @@ jobs:
           exit $FAIL
 
       - name: Comentar el resultado en el PR
-        if: always()
+        if: always() && needs.procesar.outputs.pr_number != ''
         uses: actions/github-script@v7
         env:
           RESUMEN: ${{ steps.checks.outputs.resumen }}
           JOB_STATUS: ${{ job.status }}
-          PR_PUSH: ${{ needs.procesar.outputs.pr_number }}
+          PR: ${{ needs.procesar.outputs.pr_number }}
         with:
           script: |
-            const prNumber = context.issue.number || Number(process.env.PR_PUSH || 0);
-            if (!prNumber) { core.info('no hay PR al que comentar (revisa el Job Summary)'); return; }
             const resumen = (process.env.RESUMEN || '(sin detalle)').trim();
             const ok = process.env.JOB_STATUS === 'success';
             const body = "## Terraform — validación\n\n" + resumen + "\n\n"
               + (ok
                   ? "✅ fmt / init / validate / tflint OK. Último stage activo (sin `plan`/`apply`, aún no hay Azure). Revisa y mergea."
                   : "❌ Revisa los fallos de arriba.");
-            const {data: comments} = await github.rest.issues.listComments({...context.repo, issue_number: prNumber});
+            const n = Number(process.env.PR);
+            const {data: comments} = await github.rest.issues.listComments({...context.repo, issue_number: n});
             const mine = comments.find(c => c.user.type === 'Bot' && c.body.startsWith('## Terraform — validación'));
             if (mine) await github.rest.issues.updateComment({...context.repo, comment_id: mine.id, body});
-            else await github.rest.issues.createComment({...context.repo, issue_number: prNumber, body});
+            else await github.rest.issues.createComment({...context.repo, issue_number: n, body});
 
   # ═══════════════════════════════════════════════════════════════════════════
   # 3 · PLAN   ·   DESACTIVADO hasta que  vars.AZURE_ENABLED == 'true'
@@ -245,7 +230,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.ref || needs.validate.outputs.branch }}
+          ref: ${{ needs.validate.outputs.branch || github.ref }}
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
@@ -302,7 +287,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate.outputs.branch }}
+          ref: ${{ needs.validate.outputs.branch || github.ref }}
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
