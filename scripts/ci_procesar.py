@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-ci_procesar.py — En CI: convierte cada .drawio de inbox/ en un stack de Terraform.
+ci_procesar.py — En CI: convierte cada .drawio de diagrama/ en un stack de Terraform.
 
 Determinista (sin LLM): descifrar_drawio + leer_excel + conciliar + generar_terraform.
-Por cada inbox/<algo>.drawio:
-  - genera stacks/<algo>/*.tf  (+ discrepancias.md, inventario.md, diagrama.drawio)
-  - deja el .drawio dentro del stack y lo quita de inbox/
+Busca .drawio (y .xlsx opcional) en:  diagrama/  ·  inbox/  ·  raíz del repo.
+Por cada diagrama:
+  - genera stacks/<nombre>/*.tf  (+ discrepancias.md, inventario.md, diagrama.drawio)
+  - quita el archivo de la carpeta de entrada
 
-Uso:  python scripts/ci_procesar.py            (procesa todo inbox/*.drawio)
-Salida (para GITHUB_OUTPUT):  stacks=stacks/a stacks/b   nuevos=1
+Uso:  python scripts/ci_procesar.py
+Salida (para GITHUB_OUTPUT):  stacks=stacks/a stacks/b   nuevos=2
 """
 from __future__ import annotations
 
@@ -20,11 +21,27 @@ import sys
 import tempfile
 from pathlib import Path
 
-RAIZ = Path(__file__).resolve().parents[1]     # raíz del repo
-INBOX = RAIZ / "inbox"
+RAIZ = Path(__file__).resolve().parents[1]              # raíz del repo
+ENTRADAS = ["diagrama", "inbox", ""]                    # "" = raíz
 STACKS = RAIZ / "stacks"
 sys.path.insert(0, str(Path(__file__).parent))
 import pipeline  # noqa: E402
+
+
+def _dirs_entrada() -> list[Path]:
+    return [(RAIZ / e) if e else RAIZ for e in ENTRADAS]
+
+
+def _diagramas() -> list[Path]:
+    vistos, out = set(), []
+    for base in _dirs_entrada():
+        if not base.is_dir():
+            continue
+        for d in sorted(base.glob("*.drawio")):
+            if d.resolve() not in vistos and "stacks" not in d.parts:
+                vistos.add(d.resolve())
+                out.append(d)
+    return out
 
 
 def _slug(nombre: str) -> str:
@@ -37,16 +54,16 @@ def _excel_para(drawio: Path) -> Path | None:
     par = drawio.with_suffix(".xlsx")
     if par.is_file():
         return par
-    xs = sorted(INBOX.glob("*.xlsx"))
+    xs = [x for base in _dirs_entrada() if base.is_dir() for x in sorted(base.glob("*.xlsx"))]
     return xs[0] if len(xs) == 1 else None
 
 
 def procesar_uno(drawio: Path) -> str:
     nombre = _slug(drawio.stem)
     destino = STACKS / nombre
+    xl = _excel_para(drawio)
     with tempfile.TemporaryDirectory() as tmp:
         argv = ["--drawio", str(drawio), "--salida", tmp]
-        xl = _excel_para(drawio)
         if xl:
             argv += ["--excel", str(xl)]
         rc = pipeline.main(argv)
@@ -63,7 +80,6 @@ def procesar_uno(drawio: Path) -> str:
     shutil.copy2(drawio, destino / "diagrama.drawio")
     if xl:
         shutil.copy2(xl, destino / "datos.xlsx")
-    # quitar de inbox (con git si estamos en repo)
     for p in [drawio] + ([xl] if xl else []):
         try:
             subprocess.run(["git", "rm", "-q", "-f", str(p.relative_to(RAIZ))],
@@ -74,19 +90,18 @@ def procesar_uno(drawio: Path) -> str:
 
 
 def main() -> int:
-    diagramas = sorted(INBOX.glob("*.drawio")) if INBOX.is_dir() else []
     hechos = []
-    for d in diagramas:
+    for d in _diagramas():
         print(f"::group::{d.name}")
         hechos.append(procesar_uno(d))
         print("::endgroup::")
+    linea = " ".join(hechos)
     salida = os.environ.get("GITHUB_OUTPUT")
-    linea_stacks = " ".join(hechos)
     if salida:
         with open(salida, "a", encoding="utf-8") as fh:
-            fh.write(f"stacks={linea_stacks}\n")
+            fh.write(f"stacks={linea}\n")
             fh.write(f"nuevos={len(hechos)}\n")
-    print(f"generados: {linea_stacks or '(ninguno)'}")
+    print(f"generados: {linea or '(ninguno)'}")
     return 0
 
 

@@ -1,16 +1,37 @@
 name: Procesar diagrama
 
-# Sube un .drawio (y opcional .xlsx) a la carpeta inbox/ (GitHub web -> Add file -> Upload files,
-# commit a main). Este workflow lo descifra, genera el Terraform en stacks/<nombre>/ y ABRE UN PR.
-# El PR dispara "Terraform Plan" (fmt/init/validate/tflint -> comentario en el PR).
+# Deja el/los .drawio (y un .xlsx opcional) en la carpeta  diagrama/  del repo
+# (repo -> Add file -> Upload files -> commit a main), y GitHub hace el resto:
+#
+#   descifra (determinista, SIN LLM) -> genera Terraform en stacks/<nombre>/
+#   -> abre un Pull Request -> el PR dispara "Terraform Validate"
+#      (fmt / init / validate / tflint -> comentario en el PR).
+#
+# Alternativa sin subir archivo: Actions -> "Procesar diagrama" -> Run workflow ->
+# pega el XML del .drawio en el campo 'diagrama_xml'
+# (en draw.io: Extras -> Edit Diagram -> copiar todo).
+#
+# El flujo llega SOLO hasta 'validate' (aún no hay Azure -> no hay 'plan' ni 'apply').
 
 on:
+  workflow_dispatch:
+    inputs:
+      diagrama_xml:
+        description: "Contenido del .drawio (pega aquí el XML). Déjalo vacío si ya subiste el archivo a diagrama/."
+        required: false
+        type: string
+      nombre:
+        description: "Nombre del stack (opcional; por defecto se saca del diagrama)"
+        required: false
+        type: string
   push:
     branches: [main]
     paths:
+      - "diagrama/**"
+      - "!diagrama/README.md"
       - "inbox/**"
       - "!inbox/README.md"
-  workflow_dispatch:
+      - "*.drawio"          # también si subes el .drawio a la raíz del repo
 
 permissions:
   contents: write
@@ -23,9 +44,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # PAT para que el PR resultante SÍ dispare "Terraform Plan"
-          # (un PR creado con GITHUB_TOKEN no dispara otros workflows).
-          token: ${{ secrets.AGENT_PAT }}
+          # con AGENT_PAT el PR resultante SÍ dispara "Terraform Validate"; sin él, se usa
+          # el token normal y el PR habrá que abrirlo/relanzarlo a mano.
+          token: ${{ secrets.AGENT_PAT || github.token }}
+
+      - name: Guardar el XML pegado en diagrama/ (si se usó el campo)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagrama_xml != '' }}
+        shell: bash
+        env:
+          DIAGRAMA_XML: ${{ inputs.diagrama_xml }}
+          NOMBRE: ${{ inputs.nombre }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          mkdir -p diagrama
+          slug=$(printf '%s' "$NOMBRE" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9._-')
+          [ -z "$slug" ] && slug="diagrama-${RUN_ID}"
+          printf '%s' "$DIAGRAMA_XML" > "diagrama/${slug}.drawio"
+          echo "Guardado diagrama/${slug}.drawio ($(wc -c < "diagrama/${slug}.drawio") bytes)"
+          head -c 120 "diagrama/${slug}.drawio"; echo
 
       - uses: actions/setup-python@v5
         with:
@@ -37,21 +73,31 @@ jobs:
         id: gen
         run: python scripts/ci_procesar.py
 
-      - name: Abrir Pull Request
+      - name: Rama + commit + Pull Request
         if: steps.gen.outputs.nuevos != '0' && steps.gen.outputs.nuevos != ''
         env:
-          GH_TOKEN: ${{ secrets.AGENT_PAT }}
+          GH_TOKEN: ${{ secrets.AGENT_PAT || github.token }}
+          TIENE_PAT: ${{ secrets.AGENT_PAT != '' }}
+          STACKS: ${{ steps.gen.outputs.stacks }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
         run: |
           set -e
-          RUN="${{ github.run_id }}"
-          BR="diagrama/${RUN}"
+          BR="diagrama/${RUN_ID}"
           git config user.name  "agente-terraform"
           git config user.email "agente@local"
           git checkout -b "$BR"
           git add -A
-          git commit -m "infra: stacks generados desde inbox/ (run ${RUN})"
+          git commit -m "infra: stacks generados desde el diagrama (run ${RUN_ID})"
           git push origin "$BR"
-          BODY=$(printf 'Terraform generado automáticamente desde el/los diagrama(s) de `inbox/`.\n\nStacks: `%s`\n\nEl workflow **Terraform Plan** valida esto y comenta abajo. Revisa y mergea.' "${{ steps.gen.outputs.stacks }}")
-          gh pr create --base main --head "$BR" \
-            --title "infra: ${{ steps.gen.outputs.stacks }}" \
-            --body "$BODY"
+          BODY=$(printf 'Terraform generado automáticamente desde el diagrama.\n\nStacks: `%s`\n\nEl workflow **Terraform Validate** comprueba fmt / init / validate / tflint y comenta abajo. Es el último stage (sin `plan`, aún no hay Azure). Revisa y mergea.' "$STACKS")
+          if [ "$TIENE_PAT" = "true" ]; then
+            gh pr create --base main --head "$BR" --title "infra: $STACKS" --body "$BODY"
+          else
+            echo "::warning::No hay secret AGENT_PAT. Rama '$BR' subida; abre el PR a mano: https://github.com/${REPO}/pull/new/${BR}  (y así se ejecutará 'Terraform Validate')."
+          fi
+
+      - name: Aviso si no se generó nada
+        if: steps.gen.outputs.nuevos == '0' || steps.gen.outputs.nuevos == ''
+        run: |
+          echo "::warning::No había ningún .drawio que procesar. Pega el XML en el campo 'diagrama_xml', o sube el .drawio a diagrama/ (o a inbox/ o a la raíz del repo)."

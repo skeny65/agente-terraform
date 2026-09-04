@@ -1,7 +1,6 @@
-# inbox — deja aquí tu diagrama
+# inbox — alternativa a diagrama/
 
-Sube un archivo **`.drawio`** a esta carpeta (GitHub web → *Add file → Upload files*).
-Opcional: un `.xlsx` con IPs / tamaños / nombres.
-
-Al hacer commit, el workflow **Procesar diagrama** genera el Terraform en `stacks/<nombre>/`
-y **abre un Pull Request**. Revisa el `plan` en el PR y mergéalo.
+La carpeta principal para dejar tu diagrama es **`diagrama/`**. Esta (`inbox/`) sigue
+funcionando como alternativa: cualquier `.drawio` que subas aquí también lo procesa el
+workflow **Procesar diagrama** → genera `stacks/<nombre>/` → abre un Pull Request →
+**Terraform Validate** comenta en el PR.

@@ -1,14 +1,15 @@
-name: Terraform Plan
+name: Terraform Validate
 
-# En cada PR que toque stacks/**  -> fmt / init / validate / tflint  y comenta en el PR.
-# El job 'plan' (terraform plan real) se activa cuando definas la variable de repo
-# AZURE_ENABLED = "true" y los secrets ARM_*  (hasta entonces solo llega a validate).
+# En cada PR que toque stacks/**  ->  fmt / init -backend=false / validate / tflint
+# y comenta el resultado en el PR. NO ejecuta 'terraform plan' (aún no hay Azure):
+# el flujo del agente llega SOLO hasta 'validate'. El job 'plan' se añadirá aquí el
+# día que existan la variable de repo AZURE_ENABLED y los secrets ARM_*.
 
 on:
   pull_request:
     paths:
       - "stacks/**"
-      - ".github/workflows/terraform-plan.yml"
+      - ".github/workflows/terraform-validate.yml"
   workflow_dispatch:
 
 permissions:
@@ -23,8 +24,6 @@ jobs:
   validate:
     name: fmt · init · validate · tflint
     runs-on: ubuntu-latest
-    outputs:
-      stacks: ${{ steps.detect.outputs.stacks }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -85,45 +84,9 @@ jobs:
           script: |
             const body = `## Terraform — validación\n${{ toJSON(steps.checks.outputs.resumen) }}\n\n`
               + (`${{ job.status }}` === 'success'
-                  ? '✅ fmt/init/validate OK. El `plan` real requiere Azure (var `AZURE_ENABLED=true` + secrets `ARM_*`).'
+                  ? '✅ fmt / init / validate / tflint OK. Este es el último stage del flujo del agente (sin `plan`, aún no hay Azure). Revisa y mergea.'
                   : '❌ Revisa los fallos de arriba.');
             const {data: comments} = await github.rest.issues.listComments({...context.repo, issue_number: context.issue.number});
             const mine = comments.find(c => c.user.type === 'Bot' && c.body.startsWith('## Terraform — validación'));
             if (mine) await github.rest.issues.updateComment({...context.repo, comment_id: mine.id, body});
             else await github.rest.issues.createComment({...context.repo, issue_number: context.issue.number, body});
-
-  plan:
-    name: terraform plan (requiere Azure)
-    runs-on: ubuntu-latest
-    needs: validate
-    if: ${{ vars.AZURE_ENABLED == 'true' }}
-    env:
-      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
-      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-          terraform_wrapper: false
-      - name: plan por stack
-        id: plan
-        shell: bash
-        run: |
-          OUT=""
-          for d in ${{ needs.validate.outputs.stacks }}; do
-            [ -d "$d" ] || continue
-            terraform -chdir="$d" init -input=false -no-color
-            terraform -chdir="$d" plan -input=false -no-color -lock=false -out="$d/tfplan" 2>&1 | tee "$d/plan.txt"
-            OUT="$OUT\n<details><summary>plan: $d</summary>\n\n\`\`\`\n$(tail -c 60000 "$d/plan.txt")\n\`\`\`\n</details>"
-          done
-          { echo "salida<<EOF"; echo -e "$OUT"; echo "EOF"; } >> "$GITHUB_OUTPUT"
-      - name: Comentar el plan en el PR
-        if: always() && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const body = `## Terraform — plan\n${{ toJSON(steps.plan.outputs.salida) }}\n\n> Revisa el plan. El \`apply\` es un paso manual aparte (workflow 'Terraform Apply').`;
-            await github.rest.issues.createComment({...context.repo, issue_number: context.issue.number, body});

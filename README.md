@@ -1,25 +1,27 @@
 # agente-terraform — infraestructura
 
-Terraform generado por el **agente local** (diagrama draw.io → HCL) y desplegado por GitHub Actions.
+Terraform generado por el **agente local** (diagrama draw.io → HCL) y validado por GitHub Actions.
 
 ## Flujo
 
-1. En Open WebUI subes un `.drawio`. El agente genera el Terraform y **abre un PR** aquí,
-   en `stacks/<nombre>/`.
-2. El PR dispara **Terraform Plan**: `fmt` · `init -backend=false` · `validate` · `tflint`,
-   y comenta el resultado en el PR. (El `plan` real se activa cuando haya Azure — ver abajo.)
-3. Revisas el PR. Si está bien, lo mergeas.
-4. Para aplicar: pestaña **Actions → Terraform Apply → Run workflow**, indicando el stack.
-   El job espera **aprobación manual** en el Environment `production`.
+1. Subes tu(s) `.drawio` (y un `.xlsx` opcional) a la carpeta **`diagrama/`**
+   (GitHub web → *Add file → Upload files* → commit a `main`).
+2. El push dispara **Procesar diagrama**: descifra el diagrama (determinista, sin LLM),
+   genera el Terraform en `stacks/<nombre>/` y **abre un Pull Request**.
+3. El PR dispara **Terraform Validate**: `fmt` · `init -backend=false` · `validate` · `tflint`,
+   y comenta el resultado en el PR. **Ese es el último stage** (sin `plan` ni `apply`
+   todavía — no hay Azure).
+4. Revisas el PR. Si está bien, lo mergeas.
 
-## Activar el `plan`/`apply` reales (cuando tengas Azure)
+## Cuando haya Azure (más adelante)
 
 - Variable de repo `AZURE_ENABLED` = `true`  (Settings → Secrets and variables → Actions → Variables)
 - Secrets: `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`, `ARM_TENANT_ID`, `ARM_SUBSCRIPTION_ID`
   (de un Service Principal con rol Contributor en la suscripción)
 - Backend remoto del estado: añade un bloque `backend "azurerm"` a cada stack
-  (Storage Account + container) y quita el `-backend=false` del workflow de plan.
-- Environment `production` con **Required reviewers** (para la aprobación del apply).
+  (Storage Account + container).
+- Se reañade el job `plan` a `terraform-validate.yml` y se usa `terraform-apply.yml`
+  (Environment `production` con **Required reviewers** para la aprobación del apply).
 
 ## Runner
 
