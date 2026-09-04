@@ -80,12 +80,17 @@ jobs:
       - name: Comentar resultado en el PR
         if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
+        env:
+          RESUMEN: ${{ steps.checks.outputs.resumen }}
+          JOB_STATUS: ${{ job.status }}
         with:
           script: |
-            const body = `## Terraform — validación\n${{ toJSON(steps.checks.outputs.resumen) }}\n\n`
-              + (`${{ job.status }}` === 'success'
-                  ? '✅ fmt / init / validate / tflint OK. Este es el último stage del flujo del agente (sin `plan`, aún no hay Azure). Revisa y mergea.'
-                  : '❌ Revisa los fallos de arriba.');
+            const resumen = (process.env.RESUMEN || '(sin detalle)').trim();
+            const ok = process.env.JOB_STATUS === 'success';
+            const body = "## Terraform — validación\n\n" + resumen + "\n\n"
+              + (ok
+                  ? "✅ fmt / init / validate / tflint OK. Es el último stage del flujo del agente (sin `plan`, aún no hay Azure). Revisa y mergea."
+                  : "❌ Revisa los fallos de arriba.");
             const {data: comments} = await github.rest.issues.listComments({...context.repo, issue_number: context.issue.number});
             const mine = comments.find(c => c.user.type === 'Bot' && c.body.startsWith('## Terraform — validación'));
             if (mine) await github.rest.issues.updateComment({...context.repo, comment_id: mine.id, body});
