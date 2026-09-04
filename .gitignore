@@ -1,0 +1,17 @@
+# Terraform
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+tfplan
+plan.txt
+crash.log
+
+# tfvars con secretos (el terraform.tfvars generado NO lleva secretos y SÍ se versiona)
+*.auto.tfvars
+secrets.tfvars
+*.secrets.tfvars
+
+# Python
+__pycache__/
+*.pyc
