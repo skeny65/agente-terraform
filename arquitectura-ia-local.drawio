@@ -1,0 +1,66 @@
+<mxfile host="app.diagrams.net" agent="Claude" version="24.0.0">
+  <diagram name="IA-Local-Azure" id="ia-local-basica">
+    <mxGraphModel dx="1050" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Azure Cloud boundary -->
+        <mxCell id="cloud" value="Azure Cloud" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6F0FA;strokeColor=#0078D4;verticalAlign=top;fontSize=16;fontStyle=1;fontColor=#0078D4;arcSize=3;" vertex="1" parent="1">
+          <mxGeometry x="80" y="80" width="690" height="820" as="geometry" />
+        </mxCell>
+
+        <!-- VNet boundary -->
+        <mxCell id="vnet" value="VNet: vnet-ia-local  (10.0.0.0/16)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D4E6F7;strokeColor=#0078D4;verticalAlign=top;fontSize=14;fontStyle=1;fontColor=#004578;dashed=1;arcSize=2;" vertex="1" parent="1">
+          <mxGeometry x="120" y="150" width="610" height="700" as="geometry" />
+        </mxCell>
+
+        <!-- Subnet boundary -->
+        <mxCell id="subnet" value="Subnet privada: subnet-ia  (10.0.2.0/24)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C2E0C6;strokeColor=#2D7D46;verticalAlign=top;fontSize=13;fontStyle=1;fontColor=#1E5631;dashed=1;arcSize=2;" vertex="1" parent="1">
+          <mxGeometry x="170" y="380" width="510" height="420" as="geometry" />
+        </mxCell>
+
+        <!-- NSG -->
+        <mxCell id="nsg" value="NSG: nsg-ia&#10;&#10;Egress a Internet: DENY&#10;Inbound: solo LAN interna" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDE7E9;strokeColor=#C0392B;fontSize=11;fontColor=#922B21;align=left;spacingLeft=10;verticalAlign=top;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="200" y="430" width="200" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Ubuntu VM -->
+        <mxCell id="vm" value="VM Ubuntu 22.04&#10;&#10;Nombre: vm-ia-01&#10;IP privada: 10.0.2.10&#10;Tamaño: Standard_B2s&#10;Sin IP pública" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;fontColor=#7F6000;align=left;spacingLeft=12;verticalAlign=top;spacingTop=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="290" y="560" width="270" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- Ollama container inside VM -->
+        <mxCell id="ollama" value="Ollama + Open WebUI (Docker)&#10;localhost:11434" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7F6000;fontSize=10;fontColor=#333333;dashed=0;" vertex="1" parent="1">
+          <mxGeometry x="310" y="680" width="230" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Usuario interno -->
+        <mxCell id="user" value="Usuario interno&#10;(navegador · LAN)" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="380" y="230" width="60" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Internet blocked -->
+        <mxCell id="internet" value="Internet&#10;❌ SIN SALIDA" style="ellipse;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontSize=11;fontColor=#922B21;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="600" y="20" width="140" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Edge: user -> VM -->
+        <mxCell id="e1" value="HTTPS (solo LAN interna)" style="endArrow=classic;html=1;strokeColor=#2D7D46;fontSize=10;fontColor=#1E5631;strokeWidth=2;" edge="1" parent="1" source="user" target="vm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Edge: VM -> internet blocked -->
+        <mxCell id="e2" value="egress bloqueado" style="endArrow=classic;html=1;strokeColor=#B85450;fontSize=10;fontColor=#922B21;dashed=1;strokeWidth=2;startArrow=none;" edge="1" parent="1" source="vm" target="internet">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- X mark on egress -->
+        <mxCell id="xmark" value="✕" style="text;html=1;fontSize=28;fontColor=#B85450;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="590" y="300" width="40" height="40" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
