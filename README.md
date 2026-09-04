@@ -1,32 +1,35 @@
 # agente-terraform — infraestructura
 
-Terraform generado por el **agente local** (diagrama draw.io → HCL) y validado por GitHub Actions.
+Terraform generado por el **agente local** (diagrama draw.io → HCL) y procesado por **un único
+workflow** de GitHub Actions: `.github/workflows/pipeline.yml`.
 
-## Flujo
+## Flujo — 4 stages en un solo workflow ("Diagrama a Terraform")
 
-1. Subes tu(s) `.drawio` (y un `.xlsx` opcional) a la carpeta **`diagrama/`**
-   (GitHub web → *Add file → Upload files* → commit a `main`).
-2. El push dispara **Procesar diagrama**, que en un solo run: descifra el diagrama
-   (determinista, sin LLM) → genera `stacks/<nombre>/` → `terraform fmt` →
-   **`fmt`-check · `init -backend=false` · `validate` · `tflint`** → **abre un Pull Request**
-   con el resultado de la validación en la descripción. **Ese es el último stage**
-   (sin `plan` ni `apply` todavía — no hay Azure).
-3. Revisas el PR. Si está bien, lo mergeas.
+| # | stage | qué hace | estado |
+|---|---|---|---|
+| 1 | **procesar** | descifra el/los `.drawio` de `diagrama/` (determinista, sin LLM) → `stacks/<n>/*.tf` → `terraform fmt` → **abre un Pull Request** | activo |
+| 2 | **validate** | `fmt`-check · `init -backend=false` · `validate` · `tflint` sobre lo generado → comenta en el PR + Job Summary | activo |
+| 3 | **plan** | `terraform plan` real → comenta el plan en el PR | **desactivado** (`vars.AZURE_ENABLED != 'true'` → *Skipped*) |
+| 4 | **apply** | `terraform apply` del plan del stage 3 | **desactivado** (Azure + *Run workflow* con `run_apply=true` + aprobar el Environment `production`) |
 
-> **No hace falta ningún PAT.** Para que el PR se abra solo, marca una casilla:
+Uso: sube el `.drawio` a **`diagrama/`** (*Add file → Upload files → commit a `main`*) → pestaña
+**Actions** → cuando termine, **revisa el PR y mergéalo**. Alternativa: *Actions → "Diagrama a
+Terraform" → Run workflow* y pega el XML en `diagrama_xml`.
+
+> **No hace falta ningún PAT.** Para que el PR se abra solo:
 > *Settings → Actions → General → Workflow permissions →*
 > **☑ Allow GitHub Actions to create and approve pull requests**.
-> Si no la marcas, el run sube la rama `diagrama/<run_id>` y deja el enlace para abrir el PR a mano.
+> Si no está marcado, el stage 1 sube la rama `diagrama/<run_id>` y deja el enlace para abrir el PR.
 
-## Cuando haya Azure (más adelante)
+## Activar los stages 3 y 4 (cuando haya Azure)
 
-- Variable de repo `AZURE_ENABLED` = `true`  (Settings → Secrets and variables → Actions → Variables)
-- Secrets: `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`, `ARM_TENANT_ID`, `ARM_SUBSCRIPTION_ID`
-  (de un Service Principal con rol Contributor en la suscripción)
-- Backend remoto del estado: añade un bloque `backend "azurerm"` a cada stack
-  (Storage Account + container).
-- Se reañade el job `plan` a `terraform-validate.yml` y se usa `terraform-apply.yml`
-  (Environment `production` con **Required reviewers** para la aprobación del apply).
+- Variable de repo `AZURE_ENABLED` = `true`  (*Settings → Secrets and variables → Actions → Variables*)
+- Secrets `ARM_CLIENT_ID` · `ARM_CLIENT_SECRET` · `ARM_TENANT_ID` · `ARM_SUBSCRIPTION_ID`
+  (Service Principal con rol Contributor)
+- Bloque `backend "azurerm" { … }` en cada stack (Storage Account + container)
+- *Settings → Environments → `production` → Required reviewers* (aprobación del `apply`)
+
+No hay que tocar el YAML: los jobs `plan`/`apply` ya están escritos y *gated* por esas condiciones.
 
 ## Runner
 
