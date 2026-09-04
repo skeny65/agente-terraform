@@ -59,7 +59,7 @@ def main(argv=None) -> int:
     print("[1/4] descifrando el diagrama...", file=sys.stderr)
     inv = descifrar_drawio.descifrar(a.drawio)
     (a.salida / "inventario.json").write_text(json.dumps(inv, ensure_ascii=False, indent=2), encoding="utf-8")
-    (a.salida / "inventario.md").write_text(descifrar_drawio.a_markdown(inv), encoding="utf-8")
+    (a.salida / "inventario.md").write_text(descifrar_drawio.a_markdown(inv), encoding="utf-8", newline="\n")
     print(f"      {inv['resumen']['n_nodos']} nodos, {inv['resumen']['n_conexiones']} conexiones"
           + (f"  [!] sin clasificar: {inv['resumen']['nodos_sin_clasificar']}" if inv['resumen']['nodos_sin_clasificar'] else ""),
           file=sys.stderr)
@@ -79,7 +79,7 @@ def main(argv=None) -> int:
     print("[3/4] conciliando diagrama + Excel...", file=sys.stderr)
     conc = mod_conc.conciliar(inv, datos, a.clave)
     (a.salida / "conciliado.json").write_text(json.dumps(conc, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    (a.salida / "discrepancias.md").write_text(mod_conc.a_markdown(conc), encoding="utf-8")
+    (a.salida / "discrepancias.md").write_text(mod_conc.a_markdown(conc), encoding="utf-8", newline="\n")
     r = conc["resumen"]
     print(f"      emparejados: {r['n_emparejados']}/{r['n_nodos']} · "
           f"sin fila Excel: {r['n_nodos_sin_fila']} · filas sueltas: {r['n_filas_sin_nodo']} · "
@@ -92,13 +92,14 @@ def main(argv=None) -> int:
     destino_tf = a.salida / "terraform"
     destino_tf.mkdir(exist_ok=True)
     for nombre, contenido in archivos.items():
-        (destino_tf / nombre).write_text(contenido, encoding="utf-8")
+        # newline="\n": HCL siempre con LF (en Windows saldría CRLF y `terraform fmt -check` falla en CI)
+        (destino_tf / nombre).write_text(contenido, encoding="utf-8", newline="\n")
 
     if a.con_llm:
         print("      revisión con el LLM local (puede tardar ~1 min la 1ª vez)...", file=sys.stderr)
         patrones = a.patrones.read_text(encoding="utf-8") if a.patrones and a.patrones.is_file() else ""
         (destino_tf / "revision-llm.md").write_text(
-            generar_terraform.revision_llm(archivos, conc, a.modelo, patrones), encoding="utf-8")
+            generar_terraform.revision_llm(archivos, conc, a.modelo, patrones), encoding="utf-8", newline="\n")
 
     print("", file=sys.stderr)
     print(f"OK -> {a.salida}/", file=sys.stderr)

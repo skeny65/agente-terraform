@@ -198,13 +198,14 @@ class Generador:
         rg_ref = self._ref_rg(n)
         pistas = " ".join(f"{k}={v}" for k, v in (n.get("campos") or {}).items() if k in ("inbound", "egress"))
         nota_reglas = (f'  # reglas indicadas en el diagrama: {pistas}\n' if pistas else "")
+        # el comentario rompe el bloque de alineación de `terraform fmt`: `tags` va sin alinear
         return (f'resource "azurerm_network_security_group" "{rid}" {{\n'
                 f'  name                = "{nombre_limpio(n["nombre"])}"\n'
                 f'  resource_group_name = {rg_ref}.name\n'
                 f'  location            = {rg_ref}.location\n'
                 f'{nota_reglas}'
                 f'  # TODO: traducir a security_rule (ver cerebro/patrones/seguridad y recomendaciones.md)\n'
-                f'  tags                = var.tags\n}}')
+                f'  tags = var.tags\n}}')
 
     def _r_public_ip(self, n, rid) -> str:
         rg_ref = self._ref_rg(n)
@@ -420,13 +421,14 @@ def main(argv=None) -> int:
 
     a.salida.mkdir(parents=True, exist_ok=True)
     for nombre, contenido in archivos.items():
-        (a.salida / nombre).write_text(contenido, encoding="utf-8")
+        # newline="\n": HCL siempre con LF (si no, en Windows sale CRLF y `terraform fmt -check` falla en CI)
+        (a.salida / nombre).write_text(contenido, encoding="utf-8", newline="\n")
 
     if a.con_llm:
         patrones = a.patrones.read_text(encoding="utf-8") if a.patrones and a.patrones.is_file() else ""
         sys.path.insert(0, str(Path(__file__).parent))
         (a.salida / "revision-llm.md").write_text(
-            revision_llm(archivos, conc, a.modelo, patrones), encoding="utf-8")
+            revision_llm(archivos, conc, a.modelo, patrones), encoding="utf-8", newline="\n")
         print(f"escrito: {a.salida / 'revision-llm.md'}", file=sys.stderr)
 
     print(f"proyecto escrito en {a.salida}/  ({len(archivos)} archivos)", file=sys.stderr)

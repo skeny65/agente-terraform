@@ -69,9 +69,18 @@ jobs:
 
       - run: python -m pip install --quiet openpyxl
 
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+
       - name: Descifrar + generar Terraform
         id: gen
         run: python scripts/ci_procesar.py
+
+      - name: terraform fmt (deja los stacks listos para 'Terraform Validate')
+        if: steps.gen.outputs.nuevos != '0' && steps.gen.outputs.nuevos != ''
+        run: terraform fmt -recursive stacks/
 
       - name: Rama + commit + Pull Request
         if: steps.gen.outputs.nuevos != '0' && steps.gen.outputs.nuevos != ''
