@@ -1,0 +1,323 @@
+name: Diagrama a Terraform
+
+# ── UN SOLO workflow, 4 stages encadenados ────────────────────────────────────
+#   1) procesar  · descifra el/los .drawio de diagrama/  →  stacks/<n>/*.tf   (determinista, SIN LLM)
+#   2) validate  · terraform fmt-check · init -backend=false · validate · tflint   sobre lo generado
+#   3) plan      · terraform plan     [DESACTIVADO — ver más abajo]
+#   4) apply     · terraform apply    [DESACTIVADO — ver más abajo]
+#
+# ENTRADA:  sube el .drawio a la carpeta  diagrama/  (Add file ▸ Upload files ▸ commit a main)
+#           o  Actions ▸ "Diagrama a Terraform" ▸ Run workflow ▸ pega el XML en 'diagrama_xml'.
+#
+# NO hace falta ningún PAT. Para que el PR se abra solo:
+#   Settings ▸ Actions ▸ General ▸ Workflow permissions
+#   ▸ ☑ Allow GitHub Actions to create and approve pull requests
+#
+# ── Activar los stages 3 y 4 el día que haya Azure ───────────────────────────
+#   · repo ▸ Settings ▸ Secrets and variables ▸ Actions ▸ Variables ▸  AZURE_ENABLED = true
+#   · repo ▸ Settings ▸ Secrets and variables ▸ Actions ▸ Secrets    ▸  ARM_CLIENT_ID /
+#       ARM_CLIENT_SECRET / ARM_TENANT_ID / ARM_SUBSCRIPTION_ID   (Service Principal, rol Contributor)
+#   · añadir  backend "azurerm" { ... }  a cada stack (Storage Account + container)
+#   · repo ▸ Settings ▸ Environments ▸ "production" ▸ Required reviewers   (aprobación del apply)
+#   Mientras AZURE_ENABLED no valga "true", los jobs plan/apply salen como "Skipped".
+
+on:
+  workflow_dispatch:
+    inputs:
+      diagrama_xml:
+        description: "XML del .drawio (pega aquí; vacío si ya lo subiste a diagrama/)"
+        required: false
+        type: string
+      nombre:
+        description: "Nombre del stack (opcional; por defecto se saca del diagrama)"
+        required: false
+        type: string
+      run_apply:
+        description: "Ejecutar el stage 4 (apply). Requiere Azure + aprobación."
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "diagrama/**"
+      - "!diagrama/README.md"
+      - "inbox/**"
+      - "!inbox/README.md"
+      - "*.drawio"
+  pull_request:
+    paths:
+      - "stacks/**"
+      - ".github/workflows/pipeline.yml"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  TF_VERSION: "1.15.8"
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 1 · PROCESAR   diagrama  →  stacks/<n>/*.tf
+  # ═══════════════════════════════════════════════════════════════════════════
+  procesar:
+    name: "1 · procesar (diagrama → HCL)"
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      nuevos: ${{ steps.gen.outputs.nuevos }}
+      stacks: ${{ steps.gen.outputs.stacks }}
+      branch: ${{ steps.pr.outputs.branch }}
+      pr_number: ${{ steps.pr.outputs.pr_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: XML pegado → diagrama/
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagrama_xml != '' }}
+        shell: bash
+        env:
+          DIAGRAMA_XML: ${{ inputs.diagrama_xml }}
+          NOMBRE: ${{ inputs.nombre }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          mkdir -p diagrama
+          slug=$(printf '%s' "$NOMBRE" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9._-')
+          [ -z "$slug" ] && slug="diagrama-${RUN_ID}"
+          printf '%s' "$DIAGRAMA_XML" > "diagrama/${slug}.drawio"
+          echo "Guardado diagrama/${slug}.drawio ($(wc -c < "diagrama/${slug}.drawio") bytes)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet openpyxl
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Descifrar + generar Terraform
+        id: gen
+        run: python scripts/ci_procesar.py
+
+      - name: Nada que procesar
+        if: steps.gen.outputs.nuevos == '0' || steps.gen.outputs.nuevos == ''
+        run: echo "::warning::No había ningún .drawio en diagrama/ (ni inbox/ ni la raíz). Sube un .drawio y reintenta."
+
+      - name: terraform fmt
+        if: steps.gen.outputs.nuevos != '0' && steps.gen.outputs.nuevos != ''
+        run: terraform fmt -recursive stacks/
+
+      - name: Rama + commit + Pull Request
+        id: pr
+        if: steps.gen.outputs.nuevos != '0' && steps.gen.outputs.nuevos != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STACKS: ${{ steps.gen.outputs.stacks }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+        run: |
+          set -e
+          BR="diagrama/${RUN_ID}"
+          echo "branch=$BR" >> "$GITHUB_OUTPUT"
+          git config user.name  "agente-terraform"
+          git config user.email "agente@local"
+          git checkout -b "$BR"
+          git add -A
+          git commit -m "infra: stacks generados desde el diagrama (run ${RUN_ID})"
+          git push origin "$BR"
+          BODY=$(printf 'Terraform generado desde el diagrama.\n\nStacks: `%s`\n\nStages **validate** (y luego plan/apply cuando haya Azure) en este run:\n%s/%s/actions/runs/%s\n\n> Último stage activo: `validate`. Revisa los `.tf` y mergea.' "$STACKS" "$SERVER" "$REPO" "$RUN_ID")
+          if URL=$(gh pr create --base main --head "$BR" --title "infra: $STACKS" --body "$BODY" 2>/dev/null); then
+            echo "pr_number=${URL##*/}" >> "$GITHUB_OUTPUT"
+            echo "PR abierto: $URL"
+          else
+            echo "::warning::No se pudo abrir el PR. Marca Settings ▸ Actions ▸ General ▸ 'Allow GitHub Actions to create and approve pull requests'. Rama subida: ${SERVER}/${REPO}/pull/new/${BR}"
+          fi
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 2 · VALIDATE   fmt-check · init -backend=false · validate · tflint
+  # ═══════════════════════════════════════════════════════════════════════════
+  validate:
+    name: "2 · validate"
+    needs: procesar
+    if: |
+      always() && (
+        github.event_name == 'pull_request' ||
+        (needs.procesar.result == 'success' && needs.procesar.outputs.nuevos != '0' && needs.procesar.outputs.nuevos != '')
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.which.outputs.list }}
+      branch: ${{ needs.procesar.outputs.branch }}
+      pr_number: ${{ needs.procesar.outputs.pr_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.ref || needs.procesar.outputs.branch }}
+
+      - name: Stacks a validar
+        id: which
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base='${{ github.event.pull_request.base.sha }}'
+            head='${{ github.event.pull_request.head.sha }}'
+            list=$(git diff --name-only "$base" "$head" | grep -E '^stacks/[^/]+/' | sed -E 's#^(stacks/[^/]+)/.*#\1#' | sort -u || true)
+          else
+            list="${{ needs.procesar.outputs.stacks }}"
+          fi
+          [ -z "$list" ] && list=$(find stacks -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort || true)
+          { echo "list<<EOF"; echo "$list"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          echo "Stacks: $list"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: fmt-check · init -backend=false · validate · tflint
+        id: checks
+        shell: bash
+        run: |
+          set -o pipefail
+          RES=""; FAIL=0
+          for d in ${{ steps.which.outputs.list }}; do
+            [ -d "$d" ] || continue
+            echo "::group::$d"
+            OUT=""
+            terraform -chdir="$d" fmt -check -recursive -no-color           || { FAIL=1; OUT="$OUT"$'\n'"  fmt: FALLA"; }
+            terraform -chdir="$d" init -backend=false -input=false -no-color || { FAIL=1; OUT="$OUT"$'\n'"  init: FALLA"; }
+            terraform -chdir="$d" validate -no-color 2>&1 | tee /tmp/v.txt   || { FAIL=1; OUT="$OUT"$'\n'"  validate: FALLA"$'\n'"$(sed 's/^/    /' /tmp/v.txt)"; }
+            ( cd "$d" && tflint --no-color --format compact 2>&1 | tee /tmp/l.txt ) || OUT="$OUT"$'\n'"  tflint: avisos"$'\n'"$(sed 's/^/    /' /tmp/l.txt)"
+            [ -z "$OUT" ] && OUT=$'\n'"  OK"
+            RES="$RES"$'\n'"### \`$d\`$OUT"
+            echo "::endgroup::"
+          done
+          { echo "resumen<<EOF"; echo "$RES"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          { echo "## Terraform — validación"; echo "$RES"; } >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
+      - name: Comentar el resultado en el PR
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          RESUMEN: ${{ steps.checks.outputs.resumen }}
+          JOB_STATUS: ${{ job.status }}
+          PR_PUSH: ${{ needs.procesar.outputs.pr_number }}
+        with:
+          script: |
+            const prNumber = context.issue.number || Number(process.env.PR_PUSH || 0);
+            if (!prNumber) { core.info('no hay PR al que comentar (revisa el Job Summary)'); return; }
+            const resumen = (process.env.RESUMEN || '(sin detalle)').trim();
+            const ok = process.env.JOB_STATUS === 'success';
+            const body = "## Terraform — validación\n\n" + resumen + "\n\n"
+              + (ok
+                  ? "✅ fmt / init / validate / tflint OK. Último stage activo (sin `plan`/`apply`, aún no hay Azure). Revisa y mergea."
+                  : "❌ Revisa los fallos de arriba.");
+            const {data: comments} = await github.rest.issues.listComments({...context.repo, issue_number: prNumber});
+            const mine = comments.find(c => c.user.type === 'Bot' && c.body.startsWith('## Terraform — validación'));
+            if (mine) await github.rest.issues.updateComment({...context.repo, comment_id: mine.id, body});
+            else await github.rest.issues.createComment({...context.repo, issue_number: prNumber, body});
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 3 · PLAN   ·   DESACTIVADO hasta que  vars.AZURE_ENABLED == 'true'
+  #     (mientras tanto GitHub lo muestra como "Skipped")
+  # ═══════════════════════════════════════════════════════════════════════════
+  plan:
+    name: "3 · plan (Azure)"
+    needs: [procesar, validate]
+    if: ${{ vars.AZURE_ENABLED == 'true' && needs.validate.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.ref || needs.validate.outputs.branch }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - name: terraform plan por stack
+        id: plan
+        shell: bash
+        run: |
+          OUT=""
+          mkdir -p _planes
+          for d in ${{ needs.validate.outputs.list }}; do
+            [ -d "$d" ] || continue
+            slug=$(echo "$d" | tr '/' '_')
+            terraform -chdir="$d" init -input=false -no-color
+            terraform -chdir="$d" plan -input=false -lock=false -no-color -out="tfplan" 2>&1 | tee "_planes/${slug}.txt"
+            cp "$d/tfplan" "_planes/${slug}.tfplan" || true
+            OUT="$OUT"$'\n'"<details><summary>plan · $d</summary>"$'\n\n'"\`\`\`"$'\n'"$(tail -c 60000 _planes/${slug}.txt)"$'\n'"\`\`\`"$'\n'"</details>"
+          done
+          { echo "salida<<EOF"; echo "$OUT"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          { echo "## Terraform — plan"; echo "$OUT"; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Guardar los planes para el apply
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplanes
+          path: _planes/*.tfplan
+          retention-days: 5
+      - name: Comentar el plan en el PR
+        if: needs.validate.outputs.pr_number != ''
+        uses: actions/github-script@v7
+        env:
+          SALIDA: ${{ steps.plan.outputs.salida }}
+          PR: ${{ needs.validate.outputs.pr_number }}
+        with:
+          script: |
+            const body = "## Terraform — plan\n\n" + (process.env.SALIDA || '(vacío)')
+              + "\n\n> Revisa el plan. El `apply` es el stage 4 (manual: Run workflow con run_apply=true + aprobar el Environment `production`).";
+            await github.rest.issues.createComment({...context.repo, issue_number: Number(process.env.PR), body});
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 4 · APPLY   ·   DESACTIVADO — sólo Run workflow manual con run_apply=true,
+  #     con AZURE_ENABLED == 'true' y aprobación del Environment "production"
+  # ═══════════════════════════════════════════════════════════════════════════
+  apply:
+    name: "4 · apply (Azure)"
+    needs: [procesar, validate, plan]
+    if: ${{ vars.AZURE_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && inputs.run_apply }}
+    runs-on: ubuntu-latest
+    environment: production        # ← Required reviewers = aprobación manual antes del apply
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.branch }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplanes
+          path: _planes
+      - name: terraform apply por stack
+        shell: bash
+        run: |
+          for d in ${{ needs.validate.outputs.list }}; do
+            [ -d "$d" ] || continue
+            slug=$(echo "$d" | tr '/' '_')
+            terraform -chdir="$d" init -input=false -no-color
+            cp "_planes/${slug}.tfplan" "$d/tfplan"
+            terraform -chdir="$d" apply -input=false -no-color -auto-approve "tfplan"
+          done
